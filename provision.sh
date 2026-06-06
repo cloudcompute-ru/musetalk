@@ -90,6 +90,20 @@ log() {
     echo "[cc-provision] $*"
 }
 
+# report_log <short-status-line>
+#
+# Best-effort POST of a single live status line shown under the active
+# stage's progress bar in the customer dashboard. Keeps the user informed
+# without adding new infrastructure — reuses the same provision endpoint
+# and WebSocket broadcast as report_stage. 200 chars max (enforced by the
+# backend); safe to call frequently since failures are swallowed.
+report_log() {
+    local line="$1"
+    local safe
+    safe="$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/'"'"'/g')"
+    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"log_line\":\"${safe}\"}"
+}
+
 # fail <human-message>
 #
 # Report a fatal error against the current stage and exit. A non-empty
@@ -175,30 +189,36 @@ apt-get install -y --no-install-recommends \
     >/dev/null 2>&1 || true
 
 report_stage '{"stage":"install_runtime","progress_pct":5}'
+report_log "system deps installed (ffmpeg, build-essential, libgl1)"
 
 clone_musetalk
 
 report_stage '{"stage":"install_runtime","progress_pct":15}'
+report_log "MuseTalk cloned"
 
 setup_python
 
 report_stage '{"stage":"install_runtime","progress_pct":20}'
+report_log "Python 3.10 venv ready"
 
 # Torch 2.0.1 + cu118 — MuseTalk's officially supported stack. cu118 wheels
 # run on any CUDA 11.8+ driver (Vast forward-compat covers 12.x boxes).
 # Install before requirements.txt so pip doesn't replace these wheels with
 # CPU-only torch pulled from PyPI.
 log "installing torch 2.0.1+cu118"
+report_log "installing torch 2.0.1+cu118..."
 "$PIP" install --no-warn-script-location \
     torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 \
     --index-url "$TORCH_INDEX" \
     || fail "Не удалось установить PyTorch 2.0.1+cu118. Попробуйте другой инстанс."
 
 report_stage '{"stage":"install_runtime","progress_pct":40}'
+report_log "torch 2.0.1+cu118 installed"
 
 # MuseTalk's own dependencies (diffusers, transformers, gradio, librosa,
 # moviepy, etc.). Run from the repo dir so relative paths in the file resolve.
 log "installing MuseTalk requirements"
+report_log "installing MuseTalk requirements (diffusers, gradio, librosa…)"
 "$PIP" install --no-warn-script-location -r "${MUSETALK_DIR}/requirements.txt" \
     || fail "Не удалось установить зависимости MuseTalk."
 
@@ -213,24 +233,29 @@ log "installing MuseTalk requirements"
     >/dev/null 2>&1 || true
 
 report_stage '{"stage":"install_runtime","progress_pct":55}'
+report_log "MuseTalk requirements installed"
 
 # openmim + MMLab packages for face detection and pose estimation (DWPose).
 # These MUST be installed in this exact order and version combination to be
 # compatible with torch 2.0.1. mim fetches prebuilt CUDA wheels where
 # available, avoiding a full-source compile.
 log "installing MMLab packages"
+report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location --no-cache-dir -U openmim \
     || fail "Не удалось установить openmim."
 "${VENV_DIR}/bin/mim" install mmengine \
     || fail "Не удалось установить mmengine."
+report_log "installing mmcv==2.0.1…"
 "${VENV_DIR}/bin/mim" install "mmcv==2.0.1" \
     || fail "Не удалось установить mmcv==2.0.1."
+report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
 "${VENV_DIR}/bin/mim" install "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
 "${VENV_DIR}/bin/mim" install "mmpose==1.1.0" \
     || fail "Не удалось установить mmpose==1.1.0."
 
 report_stage '{"stage":"install_runtime","progress_pct":80}'
+report_log "mmcv, mmdet, mmpose installed"
 
 # Bundled whisper encoder package — present in some MuseTalk checkouts, not
 # all. The editable install teaches Python to find the vendored encoder; it's
@@ -275,6 +300,7 @@ mkdir -p \
 # huggingface-cli download is idempotent: compares hashes, skips present files.
 if [ ! -f "${MODELS_DIR}/musetalkV15/unet.pth" ]; then
     log "downloading MuseTalk V1.0 + V1.5 weights"
+    report_log "downloading MuseTalk V1.0 + V1.5 weights…"
     "$HF_CLI" download TMElyralab/MuseTalk \
         --local-dir "${MODELS_DIR}" \
         --include "musetalk/musetalk.json" "musetalk/pytorch_model.bin" \
@@ -283,12 +309,14 @@ if [ ! -f "${MODELS_DIR}/musetalkV15/unet.pth" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":20}'
+report_log "MuseTalk weights ready"
 
 # SD-VAE (ft-mse). The HF repo is `stabilityai/sd-vae-ft-mse` but the local
 # directory MUST be `models/sd-vae` — that is the path app.py and inference.py
 # reference via vae_type="sd-vae".
 if [ ! -f "${MODELS_DIR}/sd-vae/config.json" ]; then
     log "downloading SD VAE weights"
+    report_log "downloading SD VAE (stabilityai/sd-vae-ft-mse)…"
     "$HF_CLI" download stabilityai/sd-vae-ft-mse \
         --local-dir "${MODELS_DIR}/sd-vae" \
         --include "config.json" "diffusion_pytorch_model.bin" \
@@ -296,10 +324,12 @@ if [ ! -f "${MODELS_DIR}/sd-vae/config.json" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":35}'
+report_log "SD VAE ready"
 
 # Whisper-tiny weights (audio feature extraction via transformers.WhisperModel).
 if [ ! -f "${MODELS_DIR}/whisper/pytorch_model.bin" ]; then
     log "downloading Whisper-tiny weights"
+    report_log "downloading openai/whisper-tiny…"
     "$HF_CLI" download openai/whisper-tiny \
         --local-dir "${MODELS_DIR}/whisper" \
         --include "config.json" "pytorch_model.bin" "preprocessor_config.json" \
@@ -307,10 +337,12 @@ if [ ! -f "${MODELS_DIR}/whisper/pytorch_model.bin" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":50}'
+report_log "Whisper-tiny ready"
 
 # DWPose (whole-body pose estimation used for face landmark detection).
 if [ ! -f "${MODELS_DIR}/dwpose/dw-ll_ucoco_384.pth" ]; then
     log "downloading DWPose weights"
+    report_log "downloading DWPose (yzd-v/DWPose)…"
     "$HF_CLI" download yzd-v/DWPose \
         --local-dir "${MODELS_DIR}/dwpose" \
         --include "dw-ll_ucoco_384.pth" \
@@ -318,10 +350,12 @@ if [ ! -f "${MODELS_DIR}/dwpose/dw-ll_ucoco_384.pth" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":65}'
+report_log "DWPose ready"
 
 # SyncNet (LatentSync lip-sync quality metric used during inference).
 if [ ! -f "${MODELS_DIR}/syncnet/latentsync_syncnet.pt" ]; then
     log "downloading SyncNet weights"
+    report_log "downloading SyncNet (ByteDance/LatentSync)…"
     "$HF_CLI" download ByteDance/LatentSync \
         --local-dir "${MODELS_DIR}/syncnet" \
         --include "latentsync_syncnet.pt" \
@@ -329,6 +363,7 @@ if [ ! -f "${MODELS_DIR}/syncnet/latentsync_syncnet.pt" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":80}'
+report_log "SyncNet ready"
 
 # BiSeNet face parser. The official download_weights.sh uses gdown (Google
 # Drive) for 79999_iter.pth, which is unreliable in headless provision (quota
@@ -337,6 +372,7 @@ report_stage '{"stage":"download_models","progress_pct":80}'
 # for the ResNet-18 backbone if the HF repo doesn't include it.
 if [ ! -f "${MODELS_DIR}/face-parse-bisent/79999_iter.pth" ]; then
     log "downloading face-parse-bisent weights"
+    report_log "downloading face-parse-bisent (BiSeNet)…"
     "$HF_CLI" download ManyOtherFunctions/face-parse-bisent \
         --local-dir "${MODELS_DIR}/face-parse-bisent" \
         --include "79999_iter.pth" "resnet18-5c106cde.pth" \
@@ -353,12 +389,14 @@ if [ ! -f "${MODELS_DIR}/face-parse-bisent/resnet18-5c106cde.pth" ]; then
 fi
 
 report_stage '{"stage":"download_models","progress_pct":100}'
+report_log "all model weights ready"
 
 # --- stage 3: start_server --------------------------------------------------
 
 CURRENT_STAGE="start_server"
 log "stage: start_server"
 report_stage '{"stage":"start_server"}'
+report_log "launching Gradio app, loading models into GPU…"
 
 # app.py checks `ffmpeg -version` at inference time; ensure it's in PATH.
 # System ffmpeg (installed above via apt-get) is sufficient on Linux.
