@@ -236,22 +236,28 @@ report_stage '{"stage":"install_runtime","progress_pct":55}'
 report_log "MuseTalk requirements installed"
 
 # openmim + MMLab packages for face detection and pose estimation (DWPose).
-# These MUST be installed in this exact order and version combination to be
-# compatible with torch 2.0.1. mim fetches prebuilt CUDA wheels where
-# available, avoiding a full-source compile.
+# These MUST be installed in this exact version combination to be compatible
+# with torch 2.0.1.
+#
+# NOTE: we use plain `pip install` for mmcv/mmdet/mmpose instead of
+# `mim install` to avoid download.openmmlab.com — OpenMMLab's CDN which is
+# a Chinese host that times out reliably on US/EU Vast.ai boxes. The PyPI
+# wheels for mmcv 2.x are pure-Python and sufficient for MuseTalk's inference
+# workload (no custom CUDA ops are called at runtime, only image utils).
+# openmim is still installed because mmdet/mmpose probe for it at import time.
 log "installing MMLab packages"
 report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location --no-cache-dir -U openmim \
     || fail "Не удалось установить openmim."
-"${VENV_DIR}/bin/mim" install mmengine \
+"$PIP" install --no-warn-script-location mmengine \
     || fail "Не удалось установить mmengine."
 report_log "installing mmcv==2.0.1…"
-"${VENV_DIR}/bin/mim" install "mmcv==2.0.1" \
+"$PIP" install --no-warn-script-location "mmcv==2.0.1" \
     || fail "Не удалось установить mmcv==2.0.1."
 report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
-"${VENV_DIR}/bin/mim" install "mmdet==3.1.0" \
+"$PIP" install --no-warn-script-location "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
-"${VENV_DIR}/bin/mim" install "mmpose==1.1.0" \
+"$PIP" install --no-warn-script-location "mmpose==1.1.0" \
     || fail "Не удалось установить mmpose==1.1.0."
 
 report_stage '{"stage":"install_runtime","progress_pct":80}'
