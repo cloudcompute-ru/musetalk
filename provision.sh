@@ -255,6 +255,7 @@ report_log "installing MuseTalk requirements (diffusers, gradio, librosa…)"
 
 report_stage '{"stage":"install_runtime","progress_pct":55}'
 report_log "MuseTalk requirements installed"
+send_log_tail
 
 # openmim + MMLab packages for face detection and pose estimation (DWPose).
 # These MUST be installed in this exact version combination to be compatible
@@ -306,9 +307,15 @@ if r.returncode != 0:
 print("mmcv-2.0.1 stub registered (backed by mmcv-lite)")
 PYSTUB
 
-report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
+report_stage '{"stage":"install_runtime","progress_pct":60}'
+report_log "mmcv-lite ready; installing mmdet==3.1.0…"
+send_log_tail
 "$PIP" install --no-warn-script-location "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
+
+report_stage '{"stage":"install_runtime","progress_pct":68}'
+report_log "mmdet done; installing xtcocotools, mmpose==1.1.0…"
+send_log_tail
 
 # xtcocotools is a Cython extension required by mmpose. Versions 1.12–1.13 fail
 # to compile from source with Cython 3.x (path bug in setup.py); 1.14+ fixes
@@ -317,13 +324,16 @@ report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
 "$PIP" install --no-warn-script-location "xtcocotools>=1.14" \
     || fail "Не удалось установить xtcocotools."
 
+# mmpose pulls in scipy, matplotlib, pycocotools — can take several minutes.
+# Use tee so pip output still reaches cc-provision.log (for log_tail) while
+# also being captured for the error message.
 MMPOSE_LOG="/tmp/cc-mmpose.log"
-if ! "$PIP" install --no-warn-script-location "mmpose==1.1.0" \
-        > "$MMPOSE_LOG" 2>&1; then
+"$PIP" install --no-warn-script-location "mmpose==1.1.0" \
+    2>&1 | tee "$MMPOSE_LOG" || {
     tail_msg="$(tail -c 450 "$MMPOSE_LOG" 2>/dev/null \
         | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')" || true
     fail "Не удалось установить mmpose==1.1.0: ${tail_msg}"
-fi
+}
 
 report_stage '{"stage":"install_runtime","progress_pct":80}'
 report_log "mmcv, mmdet, mmpose installed"
