@@ -252,7 +252,12 @@ report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location mmengine \
     || fail "Не удалось установить mmengine."
 report_log "installing mmcv==2.0.1…"
-"$PIP" install --no-warn-script-location "mmcv==2.0.1" \
+# MMCV_WITH_OPS=0: build mmcv as pure Python (no CUDA/C++ extensions).
+# The PyPI package is source-only — without this flag pip tries to compile
+# CUDA extensions, which fails when the system CUDA toolkit (e.g. 13.x on
+# Vast) doesn't match the cu118 torch we installed. MuseTalk only uses mmcv
+# for image utilities, not GPU ops, so the pure-Python build is sufficient.
+MMCV_WITH_OPS=0 "$PIP" install --no-warn-script-location "mmcv==2.0.1" \
     || fail "Не удалось установить mmcv==2.0.1."
 report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
 "$PIP" install --no-warn-script-location "mmdet==3.1.0" \
