@@ -104,6 +104,23 @@ report_log() {
     report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"log_line\":\"${safe}\"}"
 }
 
+# send_log_tail
+#
+# Best-effort POST of the last 200 lines of /var/log/cc-provision.log as
+# the `log_tail` field on provision_state. Persists across subsequent stage
+# updates (sticky-merged on the backend) so the Provision Log tab in the
+# dashboard always shows the most recent snapshot. Uses system python3 for
+# correct JSON encoding — safe to call before $PY / $PIP are set up.
+send_log_tail() {
+    if [ -z "$CC_PROVISION_URL" ] || [ -z "$CC_AGENT_TOKEN" ]; then return 0; fi
+    local encoded
+    encoded="$(tail -n 200 /var/log/cc-provision.log 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' \
+        2>/dev/null)" || return 0
+    [ -z "$encoded" ] && return 0
+    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"log_tail\":${encoded}}"
+}
+
 # fail <human-message>
 #
 # Report a fatal error against the current stage and exit. A non-empty
@@ -115,7 +132,11 @@ fail() {
     log "FAILED at stage=${CURRENT_STAGE}: ${msg}"
     local safe
     safe="$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/'"'"'/g')"
-    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"message\":\"${safe}\"}"
+    local log_tail_enc
+    log_tail_enc="$(tail -n 100 /var/log/cc-provision.log 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' \
+        2>/dev/null || echo 'null')"
+    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"message\":\"${safe}\",\"log_tail\":${log_tail_enc}}"
     exit 1
 }
 
@@ -239,26 +260,52 @@ report_log "MuseTalk requirements installed"
 # These MUST be installed in this exact version combination to be compatible
 # with torch 2.0.1.
 #
-# NOTE: we use plain `pip install` for mmcv/mmdet/mmpose instead of
-# `mim install` to avoid download.openmmlab.com — OpenMMLab's CDN which is
-# a Chinese host that times out reliably on US/EU Vast.ai boxes. The PyPI
-# wheels for mmcv 2.x are pure-Python and sufficient for MuseTalk's inference
-# workload (no custom CUDA ops are called at runtime, only image utils).
-# openmim is still installed because mmdet/mmpose probe for it at import time.
+# NOTE: `mmcv` (the full wheel with CUDA ops) lives ONLY on OpenMMLab's CDN
+# (download.openmmlab.com), which is unreliable from non-Chinese hosts.
+# `mmcv-lite==2.0.1` is the identical pure-Python build, available on PyPI
+# as a pre-built wheel (py2.py3-none-any — no compilation). MuseTalk only
+# calls mmcv image/file utilities at inference time, never the compiled ops.
+#
+# We install mmcv-lite, then register a minimal mmcv==2.0.1 dist-info stub
+# so that mmdet/mmpose pip dependency resolution sees mmcv as satisfied and
+# does not try to pull from the CDN.
 log "installing MMLab packages"
 report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location --no-cache-dir -U openmim \
     || fail "Не удалось установить openmim."
 "$PIP" install --no-warn-script-location mmengine \
     || fail "Не удалось установить mmengine."
-report_log "installing mmcv==2.0.1…"
-# MMCV_WITH_OPS=0: build mmcv as pure Python (no CUDA/C++ extensions).
-# The PyPI package is source-only — without this flag pip tries to compile
-# CUDA extensions, which fails when the system CUDA toolkit (e.g. 13.x on
-# Vast) doesn't match the cu118 torch we installed. MuseTalk only uses mmcv
-# for image utilities, not GPU ops, so the pure-Python build is sufficient.
-MMCV_WITH_OPS=0 "$PIP" install --no-warn-script-location "mmcv==2.0.1" \
-    || fail "Не удалось установить mmcv==2.0.1."
+
+report_log "installing mmcv-lite==2.0.1 (pure-Python, no CDN)…"
+"$PIP" install --no-warn-script-location "mmcv-lite==2.0.1" \
+    || fail "Не удалось установить mmcv-lite==2.0.1."
+
+# Register a pip dist-info stub for 'mmcv==2.0.1' so mmdet/mmpose see the
+# requirement as satisfied. The stub has an empty RECORD — mmcv-lite already
+# owns the mmcv Python module on disk.
+"$PY" - << 'PYSTUB'
+import sys, os, zipfile, tempfile, subprocess, site
+pkg_dir = next((p for p in site.getsitepackages()
+                if os.path.isdir(os.path.join(p, 'mmcv'))), None)
+if not pkg_dir:
+    print("WARNING: mmcv module not found after mmcv-lite install", file=sys.stderr)
+    sys.exit(1)
+tmp = tempfile.mkdtemp()
+whl = os.path.join(tmp, 'mmcv-2.0.1-py3-none-any.whl')
+with zipfile.ZipFile(whl, 'w') as zf:
+    zf.writestr('mmcv-2.0.1.dist-info/WHEEL',
+        'Wheel-Version: 1.0\nGenerator: mmcv-lite-stub\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+    zf.writestr('mmcv-2.0.1.dist-info/METADATA',
+        'Metadata-Version: 2.1\nName: mmcv\nVersion: 2.0.1\nSummary: Stub backed by mmcv-lite\n')
+    zf.writestr('mmcv-2.0.1.dist-info/RECORD', '')
+r = subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', '--quiet', whl],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    print(f"stub install failed: {r.stderr}", file=sys.stderr)
+    sys.exit(1)
+print("mmcv-2.0.1 stub registered (backed by mmcv-lite)")
+PYSTUB
+
 report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
 "$PIP" install --no-warn-script-location "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
@@ -288,11 +335,13 @@ fi
     >/dev/null 2>&1 || true
 
 report_stage '{"stage":"install_runtime","progress_pct":100}'
+send_log_tail
 
 # --- stage 2: download_models -----------------------------------------------
 
 CURRENT_STAGE="download_models"
 log "stage: download_models"
+send_log_tail
 report_stage '{"stage":"download_models","progress_pct":0}'
 
 MODELS_DIR="${MUSETALK_DIR}/models"
@@ -401,11 +450,13 @@ fi
 
 report_stage '{"stage":"download_models","progress_pct":100}'
 report_log "all model weights ready"
+send_log_tail
 
 # --- stage 3: start_server --------------------------------------------------
 
 CURRENT_STAGE="start_server"
 log "stage: start_server"
+send_log_tail
 report_stage '{"stage":"start_server"}'
 report_log "launching Gradio app, loading models into GPU…"
 
@@ -437,6 +488,7 @@ APP_PID="$(cat "${MUSETALK_DIR}/.app.pid" 2>/dev/null || echo '')"
 BIND_TIMEOUT_S=300
 for _ in $(seq 1 "$BIND_TIMEOUT_S"); do
     if curl -fsS --max-time 2 "http://127.0.0.1:${MUSETALK_PORT}/" >/dev/null 2>&1; then
+        send_log_tail
         report_stage '{"stage":"start_server","progress_pct":100}'
         log "provisioning complete — MuseTalk Gradio UI on port ${MUSETALK_PORT}"
         exit 0
