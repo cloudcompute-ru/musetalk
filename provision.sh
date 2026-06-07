@@ -309,8 +309,21 @@ PYSTUB
 report_log "installing mmdet==3.1.0, mmpose==1.1.0…"
 "$PIP" install --no-warn-script-location "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
-"$PIP" install --no-warn-script-location "mmpose==1.1.0" \
-    || fail "Не удалось установить mmpose==1.1.0."
+
+# xtcocotools is a Cython extension required by mmpose. Versions 1.12–1.13 fail
+# to compile from source with Cython 3.x (path bug in setup.py); 1.14+ fixes
+# this. Pre-install explicitly so pip resolves the >=1.12 constraint from
+# mmpose to the working version rather than trying the broken older ones.
+"$PIP" install --no-warn-script-location "xtcocotools>=1.14" \
+    || fail "Не удалось установить xtcocotools."
+
+MMPOSE_LOG="/tmp/cc-mmpose.log"
+if ! "$PIP" install --no-warn-script-location "mmpose==1.1.0" \
+        > "$MMPOSE_LOG" 2>&1; then
+    tail_msg="$(tail -c 450 "$MMPOSE_LOG" 2>/dev/null \
+        | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')" || true
+    fail "Не удалось установить mmpose==1.1.0: ${tail_msg}"
+fi
 
 report_stage '{"stage":"install_runtime","progress_pct":80}'
 report_log "mmcv, mmdet, mmpose installed"
