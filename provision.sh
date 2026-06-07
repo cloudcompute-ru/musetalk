@@ -324,6 +324,16 @@ send_log_tail
 "$PIP" install --no-warn-script-location "xtcocotools>=1.14" \
     || fail "Не удалось установить xtcocotools."
 
+# chumpy is an ancient package (last release 2019) whose setup.py does
+# `import pip` — a long-deprecated anti-pattern. pip's build isolation
+# creates a subprocess that has setuptools/wheel but NOT pip, so the build
+# crashes with "No module named 'pip'". --no-build-isolation exposes the
+# current venv's pip to the build process, avoiding the error.
+# `|| true`: chumpy is only used by mmpose for SMPL body-model fitting;
+# DWPose (what MuseTalk calls) never imports it, so a skip is safe.
+"$PIP" install --no-warn-script-location --no-build-isolation "chumpy" \
+    >/dev/null 2>&1 || true
+
 # mmpose pulls in scipy, matplotlib, pycocotools — can take several minutes.
 # Use tee so pip output still reaches cc-provision.log (for log_tail) while
 # also being captured for the error message.
