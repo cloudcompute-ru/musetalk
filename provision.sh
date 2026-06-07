@@ -519,6 +519,8 @@ APP_PID="$(cat "${MUSETALK_DIR}/.app.pid" 2>/dev/null || echo '')"
 # 300s timeout: model loading from disk + Gradio startup is ~90s on fast NVMe,
 # up to ~3 min on slow container storage.
 BIND_TIMEOUT_S=300
+_elapsed=0
+_next_report=15
 for _ in $(seq 1 "$BIND_TIMEOUT_S"); do
     if curl -fsS --max-time 2 "http://127.0.0.1:${MUSETALK_PORT}/" >/dev/null 2>&1; then
         send_log_tail
@@ -530,6 +532,19 @@ for _ in $(seq 1 "$BIND_TIMEOUT_S"); do
         log "app.py exited before binding port ${MUSETALK_PORT}"
         tail_msg="$(tail -c 500 /var/log/cc-musetalk.log 2>/dev/null | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')" || true
         fail "MuseTalk приложение упало при запуске: ${tail_msg}"
+    fi
+    _elapsed=$((_elapsed + 1))
+    if [ "$_elapsed" -ge "$_next_report" ]; then
+        # Surface the last non-empty line from the Gradio app log so the user
+        # can see what the model loader is doing without SSHing in.
+        _app_line="$(grep -v '^\s*$' /var/log/cc-musetalk.log 2>/dev/null \
+            | tail -1 | sed 's/\\/\\\\/g; s/"/'"'"'/g' | cut -c1-140)" || true
+        if [ -n "$_app_line" ]; then
+            report_log "loading models (${_elapsed}s): ${_app_line}"
+        else
+            report_log "loading models into GPU… (${_elapsed}s)"
+        fi
+        _next_report=$((_next_report + 15))
     fi
     sleep 1
 done
