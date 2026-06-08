@@ -121,6 +121,21 @@ send_log_tail() {
     report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"log_tail\":${encoded}}"
 }
 
+# send_app_log_tail
+#
+# Best-effort POST of the last 200 lines of the application runtime log. This
+# is where app.py tracebacks and Gradio/model-load output land, so it is more
+# useful than cc-provision.log once the start_server stage begins.
+send_app_log_tail() {
+    if [ -z "$CC_PROVISION_URL" ] || [ -z "$CC_AGENT_TOKEN" ]; then return 0; fi
+    local encoded
+    encoded="$(tail -n 200 /var/log/cc-musetalk.log 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' \
+        2>/dev/null)" || return 0
+    [ -z "$encoded" ] && return 0
+    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"app_log_tail\":${encoded}}"
+}
+
 # fail <human-message>
 #
 # Report a fatal error against the current stage and exit. A non-empty
@@ -136,7 +151,11 @@ fail() {
     log_tail_enc="$(tail -n 100 /var/log/cc-provision.log 2>/dev/null \
         | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' \
         2>/dev/null || echo 'null')"
-    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"message\":\"${safe}\",\"log_tail\":${log_tail_enc}}"
+    local app_log_tail_enc
+    app_log_tail_enc="$(tail -n 100 /var/log/cc-musetalk.log 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' \
+        2>/dev/null || echo 'null')"
+    report_stage "{\"stage\":\"${CURRENT_STAGE}\",\"message\":\"${safe}\",\"log_tail\":${log_tail_enc},\"app_log_tail\":${app_log_tail_enc}}"
     exit 1
 }
 
@@ -261,15 +280,9 @@ send_log_tail
 # These MUST be installed in this exact version combination to be compatible
 # with torch 2.0.1.
 #
-# NOTE: `mmcv` (the full wheel with CUDA ops) lives ONLY on OpenMMLab's CDN
-# (download.openmmlab.com), which is unreliable from non-Chinese hosts.
-# `mmcv-lite==2.0.1` is the identical pure-Python build, available on PyPI
-# as a pre-built wheel (py2.py3-none-any — no compilation). MuseTalk only
-# calls mmcv image/file utilities at inference time, never the compiled ops.
-#
-# We install mmcv-lite, then register a minimal mmcv==2.0.1 dist-info stub
-# so that mmdet/mmpose pip dependency resolution sees mmcv as satisfied and
-# does not try to pull from the CDN.
+# `mmcv-lite` installs cleanly from PyPI, but it does NOT include mmcv._ext.
+# DWPose imports mmdet, which imports mmcv.ops.nms at runtime, so MuseTalk needs
+# the real OpenMMLab CUDA wheel with compiled ops.
 log "installing MMLab packages"
 report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location --no-cache-dir -U openmim \
@@ -277,38 +290,25 @@ report_log "installing openmim, mmengine…"
 "$PIP" install --no-warn-script-location mmengine \
     || fail "Не удалось установить mmengine."
 
-report_log "installing mmcv-lite==2.0.1 (pure-Python, no CDN)…"
-"$PIP" install --no-warn-script-location "mmcv-lite==2.0.1" \
-    || fail "Не удалось установить mmcv-lite==2.0.1."
+report_log "installing mmcv==2.0.1 with CUDA ops (OpenMMLab wheel)…"
+"$PIP" uninstall -y mmcv mmcv-lite >/dev/null 2>&1 || true
+MMCV_LOG="/tmp/cc-mmcv.log"
+"$PIP" install --no-warn-script-location --no-cache-dir --timeout 60 --retries 10 \
+    "mmcv==2.0.1" \
+    -f "https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html" \
+    2>&1 | tee "$MMCV_LOG" || {
+    tail_msg="$(tail -c 450 "$MMCV_LOG" 2>/dev/null \
+        | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')" || true
+    fail "Не удалось установить mmcv==2.0.1 с CUDA ops: ${tail_msg}"
+}
 
-# Register a pip dist-info stub for 'mmcv==2.0.1' so mmdet/mmpose see the
-# requirement as satisfied. The stub has an empty RECORD — mmcv-lite already
-# owns the mmcv Python module on disk.
-"$PY" - << 'PYSTUB'
-import sys, os, zipfile, tempfile, subprocess, site
-pkg_dir = next((p for p in site.getsitepackages()
-                if os.path.isdir(os.path.join(p, 'mmcv'))), None)
-if not pkg_dir:
-    print("WARNING: mmcv module not found after mmcv-lite install", file=sys.stderr)
-    sys.exit(1)
-tmp = tempfile.mkdtemp()
-whl = os.path.join(tmp, 'mmcv-2.0.1-py3-none-any.whl')
-with zipfile.ZipFile(whl, 'w') as zf:
-    zf.writestr('mmcv-2.0.1.dist-info/WHEEL',
-        'Wheel-Version: 1.0\nGenerator: mmcv-lite-stub\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
-    zf.writestr('mmcv-2.0.1.dist-info/METADATA',
-        'Metadata-Version: 2.1\nName: mmcv\nVersion: 2.0.1\nSummary: Stub backed by mmcv-lite\n')
-    zf.writestr('mmcv-2.0.1.dist-info/RECORD', '')
-r = subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', '--quiet', whl],
-                   capture_output=True, text=True)
-if r.returncode != 0:
-    print(f"stub install failed: {r.stderr}", file=sys.stderr)
-    sys.exit(1)
-print("mmcv-2.0.1 stub registered (backed by mmcv-lite)")
-PYSTUB
+"$PY" - << 'PYSMOKE' || fail "mmcv установлен, но mmcv.ops не импортируется."
+from mmcv.ops import batched_nms
+print("mmcv ops import ok")
+PYSMOKE
 
 report_stage '{"stage":"install_runtime","progress_pct":60}'
-report_log "mmcv-lite ready; installing mmdet==3.1.0…"
+report_log "mmcv CUDA ops ready; installing mmdet==3.1.0…"
 send_log_tail
 "$PIP" install --no-warn-script-location "mmdet==3.1.0" \
     || fail "Не удалось установить mmdet==3.1.0."
@@ -524,6 +524,7 @@ _next_report=15
 for _ in $(seq 1 "$BIND_TIMEOUT_S"); do
     if curl -fsS --max-time 2 "http://127.0.0.1:${MUSETALK_PORT}/" >/dev/null 2>&1; then
         send_log_tail
+        send_app_log_tail
         report_stage '{"stage":"start_server","progress_pct":100}'
         log "provisioning complete — MuseTalk Gradio UI on port ${MUSETALK_PORT}"
         exit 0
@@ -544,6 +545,7 @@ for _ in $(seq 1 "$BIND_TIMEOUT_S"); do
         else
             report_log "loading models into GPU… (${_elapsed}s)"
         fi
+        send_app_log_tail
         _next_report=$((_next_report + 15))
     fi
     sleep 1
