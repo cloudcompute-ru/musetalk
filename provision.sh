@@ -161,6 +161,39 @@ fail() {
 
 trap 'fail "Установка прервана на этапе ${CURRENT_STAGE}. Подробности в /var/log/cc-provision.log на инстансе."' ERR
 
+# run_user_hook <stage-id>
+#
+# Runs the customer-supplied setup script, if any. MUST be called AFTER our
+# install steps but immediately BEFORE the app server starts, so anything the
+# script installs (pip packages, model weights, extra repos) is on disk for the
+# server's first and only boot — no restart needed.
+#
+# The script arrives base64-encoded in CC_USER_SETUP_B64 (base64 sidesteps all
+# shell-quoting hazards). Its stdout/stderr lands in /var/log/cc-provision.log,
+# so it shows up in the dashboard log tail. A non-zero exit aborts provisioning
+# and surfaces the failure to the wizard.
+run_user_hook() {
+    [ -n "${CC_USER_SETUP_B64:-}" ] || return 0
+    _stage="${1:-start_server}"
+    log "running custom setup script"
+    report_stage "{\"stage\":\"${_stage}\",\"message\":\"running custom setup script\"}"
+    if ! printf '%s' "$CC_USER_SETUP_B64" | base64 -d > /tmp/cc-user-setup.sh 2>/dev/null; then
+        log "could not decode CC_USER_SETUP_B64; skipping custom setup"
+        return 0
+    fi
+    chmod +x /tmp/cc-user-setup.sh
+    set +e
+    bash /tmp/cc-user-setup.sh 2>&1 | sed 's/^/[user-setup] /'
+    _rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$_rc" -ne 0 ]; then
+        _tail="$(tail -c 400 /var/log/cc-provision.log 2>/dev/null | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')"
+        report_stage "{\"stage\":\"${_stage}\",\"message\":\"custom setup script failed (exit ${_rc}): ${_tail}\"}"
+        exit "$_rc"
+    fi
+    log "custom setup script finished"
+}
+
 # setup_python
 #
 # Install uv and create a seeded Python 3.10 venv at $VENV_DIR. uv downloads a
@@ -491,6 +524,12 @@ CURRENT_STAGE="start_server"
 log "stage: start_server"
 send_log_tail
 report_stage '{"stage":"start_server"}'
+
+# Custom setup runs here — MuseTalk + deps + weights are in place, but the
+# Gradio app hasn't started, so anything the script installs is present for the
+# single launch below.
+run_user_hook "start_server"
+
 report_log "launching Gradio app, loading models into GPU…"
 
 # app.py checks `ffmpeg -version` at inference time; ensure it's in PATH.
