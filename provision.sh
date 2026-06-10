@@ -64,6 +64,16 @@ export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
 # Enables hf_transfer fast-path in huggingface-cli downloads.
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
+# Abort and retry a stalled request after 30s instead of hanging forever —
+# huggingface-cli has no default download timeout.
+export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-30}"
+
+# Force the classic LFS download path. A growing set of HF repos (e.g.
+# openai/whisper-tiny) are Xet-backed, and the Xet CAS endpoint
+# (cas-server.xethub.hf.co) is frequently unreachable from RU/Vast boxes —
+# the download then hangs indefinitely while plain-LFS repos download fine.
+export HF_HUB_DISABLE_XET=1
+
 # Tracks current stage for the ERR trap.
 CURRENT_STAGE="install_runtime"
 
@@ -88,6 +98,24 @@ report_stage() {
 
 log() {
     echo "[cc-provision] $*"
+}
+
+# hf_download <repo> <args...>
+#
+# Wraps `huggingface-cli download` with a hard per-attempt timeout and retries.
+# Without the timeout a single stalled connection (common with Xet-backed repos
+# from RU/Vast) hangs provisioning forever. Each attempt is capped at 10 min;
+# up to 3 attempts before giving up so the caller's `|| fail` can report it.
+hf_download() {
+    local _n
+    for _n in 1 2 3; do
+        if timeout 600 "$HF_CLI" download "$@"; then
+            return 0
+        fi
+        log "huggingface download attempt ${_n} failed/timed out; retrying in 5s"
+        sleep 5
+    done
+    return 1
 }
 
 # report_log <short-status-line>
@@ -427,7 +455,7 @@ mkdir -p \
 if [ ! -f "${MODELS_DIR}/musetalkV15/unet.pth" ]; then
     log "downloading MuseTalk V1.0 + V1.5 weights"
     report_log "downloading MuseTalk V1.0 + V1.5 weights…"
-    "$HF_CLI" download TMElyralab/MuseTalk \
+    hf_download TMElyralab/MuseTalk \
         --local-dir "${MODELS_DIR}" \
         --include "musetalk/musetalk.json" "musetalk/pytorch_model.bin" \
                   "musetalkV15/musetalk.json" "musetalkV15/unet.pth" \
@@ -443,7 +471,7 @@ report_log "MuseTalk weights ready"
 if [ ! -f "${MODELS_DIR}/sd-vae/config.json" ]; then
     log "downloading SD VAE weights"
     report_log "downloading SD VAE (stabilityai/sd-vae-ft-mse)…"
-    "$HF_CLI" download stabilityai/sd-vae-ft-mse \
+    hf_download stabilityai/sd-vae-ft-mse \
         --local-dir "${MODELS_DIR}/sd-vae" \
         --include "config.json" "diffusion_pytorch_model.bin" \
         || fail "Не удалось скачать веса SD VAE."
@@ -456,7 +484,7 @@ report_log "SD VAE ready"
 if [ ! -f "${MODELS_DIR}/whisper/pytorch_model.bin" ]; then
     log "downloading Whisper-tiny weights"
     report_log "downloading openai/whisper-tiny…"
-    "$HF_CLI" download openai/whisper-tiny \
+    hf_download openai/whisper-tiny \
         --local-dir "${MODELS_DIR}/whisper" \
         --include "config.json" "pytorch_model.bin" "preprocessor_config.json" \
         || fail "Не удалось скачать веса Whisper-tiny."
@@ -469,7 +497,7 @@ report_log "Whisper-tiny ready"
 if [ ! -f "${MODELS_DIR}/dwpose/dw-ll_ucoco_384.pth" ]; then
     log "downloading DWPose weights"
     report_log "downloading DWPose (yzd-v/DWPose)…"
-    "$HF_CLI" download yzd-v/DWPose \
+    hf_download yzd-v/DWPose \
         --local-dir "${MODELS_DIR}/dwpose" \
         --include "dw-ll_ucoco_384.pth" \
         || fail "Не удалось скачать веса DWPose."
@@ -482,7 +510,7 @@ report_log "DWPose ready"
 if [ ! -f "${MODELS_DIR}/syncnet/latentsync_syncnet.pt" ]; then
     log "downloading SyncNet weights"
     report_log "downloading SyncNet (ByteDance/LatentSync)…"
-    "$HF_CLI" download ByteDance/LatentSync \
+    hf_download ByteDance/LatentSync \
         --local-dir "${MODELS_DIR}/syncnet" \
         --include "latentsync_syncnet.pt" \
         || fail "Не удалось скачать веса SyncNet."
@@ -499,7 +527,7 @@ report_log "SyncNet ready"
 if [ ! -f "${MODELS_DIR}/face-parse-bisent/79999_iter.pth" ]; then
     log "downloading face-parse-bisent weights"
     report_log "downloading face-parse-bisent (BiSeNet)…"
-    "$HF_CLI" download ManyOtherFunctions/face-parse-bisent \
+    hf_download ManyOtherFunctions/face-parse-bisent \
         --local-dir "${MODELS_DIR}/face-parse-bisent" \
         --include "79999_iter.pth" "resnet18-5c106cde.pth" \
         || fail "Не удалось скачать веса face-parse-bisent."
