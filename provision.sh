@@ -40,10 +40,9 @@ CC_AGENT_TOKEN="${CC_AGENT_TOKEN:-}"
 
 # --- pinned upstream --------------------------------------------------------
 
-# Official MuseTalk upstream. Pin to a commit SHA after first successful
-# deployment — using `main` for initial rollout.
+# Official MuseTalk upstream, fixed for reproducible application launches.
 MUSETALK_UPSTREAM="https://github.com/TMElyralab/MuseTalk.git"
-MUSETALK_SHA="main"
+MUSETALK_SHA="0a89dec45a0192b824e3cf4daf96c239440c5ed8"
 
 MUSETALK_PORT="${MUSETALK_PORT:-7860}"
 MUSETALK_DIR="${MUSETALK_DIR:-/workspace/MuseTalk}"
@@ -60,6 +59,9 @@ PIP=""
 
 # HF cache on the large workspace disk to avoid filling the container root.
 export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
+export GRADIO_ROOT_PATH="${GRADIO_ROOT_PATH-/app-ui}"
+S3FD_SHA256="619a31681264d3f7f7fc7a16a42cbbe8b23f31a256f75a366e5a1bcd59b33543"
 
 # Enables hf_transfer fast-path in huggingface-cli downloads.
 export HF_HUB_ENABLE_HF_TRANSFER=1
@@ -270,6 +272,22 @@ clone_musetalk() {
     local tail_msg
     tail_msg="$(tail -c 500 "$clog" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | sed 's/"/'"'"'/g')" || true
     fail "Не удалось склонировать MuseTalk: ${tail_msg}"
+}
+
+download_s3fd() {
+    local target="${TORCH_HOME}/hub/checkpoints/s3fd-619a316812.pth"
+    mkdir -p "$(dirname "$target")"
+    if [ -f "$target" ] && printf '%s  %s\n' "$S3FD_SHA256" "$target" | sha256sum --check --status; then
+        return 0
+    fi
+    curl -fL --retry 2 --connect-timeout 20 --max-time 1800 \
+        "https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth" \
+        -o "${target}.part" || return 1
+    if ! printf '%s  %s\n' "$S3FD_SHA256" "${target}.part" | sha256sum --check --status; then
+        log "S3FD checksum mismatch; incomplete weights will not be used"
+        return 1
+    fi
+    mv "${target}.part" "$target"
 }
 
 mkdir -p "$HF_HOME"
@@ -541,6 +559,9 @@ if [ ! -f "${MODELS_DIR}/face-parse-bisent/resnet18-5c106cde.pth" ]; then
         -o "${MODELS_DIR}/face-parse-bisent/resnet18-5c106cde.pth" \
         || fail "Не удалось скачать веса ResNet-18."
 fi
+
+report_log "downloading and verifying S3FD face detector…"
+download_s3fd || fail "Не удалось скачать или проверить веса S3FD."
 
 report_stage '{"stage":"download_models","progress_pct":100}'
 report_log "all model weights ready"
